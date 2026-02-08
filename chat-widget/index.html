@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chat Widget Demo</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 40px;
+      background: #f3f4f6;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      display: flex;
+      gap: 40px;
+      flex-wrap: wrap;
+    }
+    h2 { margin: 0 0 12px; font-size: 14px; color: #6b7280; }
+    .sku-btn {
+      padding: 8px 14px;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      background: #fff;
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.15s;
+    }
+    .sku-btn:hover { border-color: #4f46e5; }
+    #compare-btn:disabled { background: #9ca3af; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+  <div>
+    <h2>Ürün Seçimi</h2>
+    <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px;">
+      <button class="sku-btn" data-sku="SKU-IP15">iPhone 15 Pro</button>
+      <button class="sku-btn" data-sku="SKU-S24">Galaxy S24 Ultra</button>
+      <button class="sku-btn" data-sku="SKU-P9">Pixel 9 Pro</button>
+      <button class="sku-btn" data-sku="SKU-MBA">MacBook Air M3</button>
+      <button class="sku-btn" data-sku="SKU-TP14">ThinkPad X1 Carbon</button>
+      <button class="sku-btn" data-sku="SKU-XPS15">Dell XPS 15</button>
+    </div>
+    <div id="selected" style="font-size: 13px; color: #6b7280; margin-bottom: 12px;"></div>
+    <button id="compare-btn" disabled style="padding: 8px 16px; background: #4f46e5; color: #fff; border: none; border-radius: 8px; cursor: pointer; font-size: 14px;">
+      Karsilastir
+    </button>
+  </div>
+
+  <div>
+    <h2>Chat</h2>
+    <chat-widget title="Urun Karsilastirma" placeholder="Bir soru sorun..."></chat-widget>
+  </div>
+
+  <script type="module" src="/src/index.js"></script>
+  <script>
+    const selectedSkus = new Set();
+
+    document.querySelectorAll('.sku-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const sku = btn.dataset.sku;
+        if (selectedSkus.has(sku)) {
+          selectedSkus.delete(sku);
+          btn.style.background = '';
+          btn.style.color = '';
+        } else {
+          selectedSkus.add(sku);
+          btn.style.background = '#4f46e5';
+          btn.style.color = '#fff';
+        }
+        document.getElementById('selected').textContent =
+          selectedSkus.size > 0 ? 'Secili: ' + [...selectedSkus].join(', ') : '';
+        document.getElementById('compare-btn').disabled = selectedSkus.size < 2;
+      });
+    });
+
+    document.getElementById('compare-btn').addEventListener('click', () => {
+      document.dispatchEvent(new CustomEvent('set-skus', {
+        detail: { skus: [...selectedSkus] }
+      }));
+      document.getElementById('compare-btn').textContent = 'SKU\'lar gonderildi!';
+      setTimeout(() => {
+        document.getElementById('compare-btn').textContent = 'Karsilastir';
+      }, 2000);
+    });
+  </script>
+</body>
+</html>
