@@ -1,7 +1,7 @@
 <svelte:options customElement="chat-widget" />
 
 <script>
-  import { onMount, onDestroy, afterUpdate, createEventDispatcher } from 'svelte';
+  import { onMount, onDestroy, afterUpdate, tick, createEventDispatcher } from 'svelte';
   import { sendMessage, onMessage, setSkus } from '../services/chatService.js';
   import { scrollToBottom } from '../utils/scrollHelper.js';
   import { marked } from 'marked';
@@ -14,26 +14,42 @@
 
   const dispatch = createEventDispatcher();
 
+  let open = false;
   let messages = [];
   let inputText = '';
   let loading = false;
   let listContainer;
+  let inputEl;
+  let fabEl;
   let unsubscribe;
+  let nextId = 0;
 
-  function handleSetSkus(e) {
+  function sanitizeHtml(html) {
+    const div = document.createElement('div');
+    div.innerHTML = html;
+    div.querySelectorAll('script,iframe,object,embed,form').forEach(el => el.remove());
+    return div.innerHTML;
+  }
+
+  async function handleSetSkus(e) {
     if (e.detail && Array.isArray(e.detail.skus)) {
       setSkus(e.detail.skus);
+      messages = [];
+      open = true;
 
       const autoMsg = 'Bu ürünleri karşılaştır';
       const userMsg = {
-        id: Date.now(),
+        id: ++nextId,
         text: autoMsg,
         sender: 'user',
         timestamp: new Date()
       };
-      messages = [...messages, userMsg];
+      messages = [userMsg];
       loading = true;
       sendMessage(autoMsg);
+
+      await tick();
+      if (inputEl) inputEl.focus();
     }
   }
 
@@ -51,7 +67,7 @@
   });
 
   afterUpdate(() => {
-    scrollToBottom(listContainer);
+    if (open) scrollToBottom(listContainer);
   });
 
   function handleSend() {
@@ -59,7 +75,7 @@
     if (!trimmed) return;
 
     const userMsg = {
-      id: Date.now(),
+      id: ++nextId,
       text: trimmed,
       sender: 'user',
       timestamp: new Date()
@@ -79,62 +95,110 @@
       e.preventDefault();
       handleSend();
     }
+    if (e.key === 'Escape' && open) {
+      open = false;
+      if (fabEl) fabEl.focus();
+    }
   }
 </script>
 
-<div class="chat-widget" class:dark={theme === 'dark'}>
-  <div class="header">
-    <div class="header-dot"></div>
-    <span class="header-title">{title}</span>
-  </div>
-
-  <div class="message-list" bind:this={listContainer}>
-    {#each messages as msg (msg.id)}
-      <div class="bubble-row {msg.sender}">
-        <div class="bubble {msg.sender}">
-          {#if msg.sender === 'bot'}
-            <div class="text markdown">{@html marked(msg.text)}</div>
-          {:else}
-            <p class="text">{msg.text}</p>
-          {/if}
-          <span class="time">
-            {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-          </span>
-        </div>
+<div class="chat-container" class:dark={theme === 'dark'}>
+  {#if open}
+    <div class="chat-widget" role="dialog" aria-label="Chat panel">
+      <div class="header">
+        <div class="header-dot"></div>
+        <span class="header-title">{title}</span>
+        <button class="close-btn" on:click={() => open = false} aria-label="Kapat">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
       </div>
-    {/each}
-    {#if loading}
-      <div class="bubble-row bot">
-        <div class="bubble bot typing">
-          <span class="dot"></span>
-          <span class="dot"></span>
-          <span class="dot"></span>
-        </div>
-      </div>
-    {/if}
-    {#if messages.length === 0 && !loading}
-      <div class="empty">Henüz mesaj yok. Bir mesaj göndererek başlayın!</div>
-    {/if}
-  </div>
 
-  <div class="chat-input">
-    <input
-      type="text"
-      bind:value={inputText}
-      on:keydown={handleKeydown}
-      {placeholder}
-      disabled={loading}
-    />
-    <button on:click={handleSend} disabled={loading || !inputText.trim()}>
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <line x1="22" y1="2" x2="11" y2="13" />
-        <polygon points="22 2 15 22 11 13 2 9 22 2" />
+      <div class="message-list" bind:this={listContainer}>
+        {#each messages as msg (msg.id)}
+          <div class="bubble-row {msg.sender}">
+            <div class="bubble {msg.sender}">
+              {#if msg.sender === 'bot'}
+                <div class="text markdown">{@html sanitizeHtml(marked(msg.text))}</div>
+              {:else}
+                <p class="text">{msg.text}</p>
+              {/if}
+              <span class="time">
+                {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              </span>
+            </div>
+          </div>
+        {/each}
+        {#if loading}
+          <div class="bubble-row bot">
+            <div class="bubble bot typing">
+              <span class="dot"></span>
+              <span class="dot"></span>
+              <span class="dot"></span>
+            </div>
+          </div>
+        {/if}
+        {#if messages.length === 0 && !loading}
+          <div class="empty">Henüz mesaj yok. Bir mesaj göndererek başlayın!</div>
+        {/if}
+      </div>
+
+      <div class="chat-input">
+        <input
+          type="text"
+          bind:value={inputText}
+          bind:this={inputEl}
+          on:keydown={handleKeydown}
+          {placeholder}
+          disabled={loading}
+        />
+        <button on:click={handleSend} disabled={loading || !inputText.trim()} aria-label="Gonder">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13" />
+            <polygon points="22 2 15 22 11 13 2 9 22 2" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  {/if}
+
+  <button class="fab" bind:this={fabEl} on:click={() => open = !open} aria-label={open ? 'Kapat' : 'Karşılaştır'}>
+    {#if open}
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="18" y1="6" x2="6" y2="18" />
+        <line x1="6" y1="6" x2="18" y2="18" />
       </svg>
-    </button>
-  </div>
+    {:else}
+      <!-- Compare icon: two columns side by side -->
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="3" width="8" height="18" rx="1" />
+        <rect x="14" y="3" width="8" height="18" rx="1" />
+        <line x1="6" y1="8" x2="6" y2="8.01" />
+        <line x1="6" y1="12" x2="6" y2="12.01" />
+        <line x1="6" y1="16" x2="6" y2="16.01" />
+        <line x1="18" y1="8" x2="18" y2="8.01" />
+        <line x1="18" y1="12" x2="18" y2="12.01" />
+        <line x1="18" y1="16" x2="18" y2="16.01" />
+      </svg>
+    {/if}
+  </button>
 </div>
 
 <style>
+  .chat-container {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 12px;
+    z-index: 9999;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+
   .chat-widget {
     display: flex;
     flex-direction: column;
@@ -143,14 +207,58 @@
     border-radius: 16px;
     overflow: hidden;
     box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     background: #fff;
     color: #1f2937;
     border: 1px solid #e5e7eb;
+    animation: slideUp 0.25s ease-out;
+  }
+
+  @keyframes slideUp {
+    from { opacity: 0; transform: translateY(16px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* FAB */
+  .fab {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    border: none;
+    background: #4f46e5;
+    color: #fff;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 16px rgba(79, 70, 229, 0.4);
+    transition: background 0.2s, transform 0.2s;
+    flex-shrink: 0;
+  }
+  .fab:hover {
+    background: #4338ca;
+    transform: scale(1.05);
+  }
+
+  /* Close button in header */
+  .close-btn {
+    background: none;
+    border: none;
+    color: #fff;
+    cursor: pointer;
+    padding: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    opacity: 0.8;
+    transition: opacity 0.15s;
+  }
+  .close-btn:hover {
+    opacity: 1;
   }
 
   /* Dark theme */
-  .chat-widget.dark {
+  .dark .chat-widget {
     background: #1f2937;
     color: #f3f4f6;
     border-color: #374151;
@@ -183,6 +291,13 @@
   }
   .dark .message-list::-webkit-scrollbar-thumb {
     background: #4b5563;
+  }
+  .dark .fab {
+    background: #6366f1;
+    box-shadow: 0 4px 16px rgba(99, 102, 241, 0.4);
+  }
+  .dark .fab:hover {
+    background: #4f46e5;
   }
 
   /* Header */

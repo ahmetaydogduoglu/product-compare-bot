@@ -11,6 +11,7 @@ let skus = [];
  */
 export function setSkus(skuList) {
   skus = skuList;
+  sessionId = null;
 }
 
 /**
@@ -46,7 +47,7 @@ export async function sendMessage(text) {
     }
 
     const botMessage = {
-      id: Date.now(),
+      id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       text: data.reply,
       sender: 'bot',
       timestamp: new Date(),
@@ -55,7 +56,7 @@ export async function sendMessage(text) {
     listeners.forEach((cb) => cb(botMessage));
   } catch (err) {
     const errorMessage = {
-      id: Date.now(),
+      id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       text: `Hata: ${err.message}`,
       sender: 'bot',
       timestamp: new Date(),
