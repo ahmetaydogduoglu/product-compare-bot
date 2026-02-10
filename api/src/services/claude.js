@@ -2,7 +2,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 
 const client = new Anthropic();
 
-const MODEL = 'claude-haiku-20240909';
+const MODEL = 'claude-haiku-4-5-20251001';
 const MAX_TOKENS = 1024;
 
 // sessionId → { products: Map<sku, product>, messages: Array }
