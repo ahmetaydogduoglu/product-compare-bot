@@ -1,8 +1,17 @@
-const API_URL = 'http://localhost:3001/api/chat';
+let apiUrl = 'http://localhost:3001/api/chat';
 
 const listeners = [];
 let sessionId = null;
 let skus = [];
+let sending = false;
+
+/**
+ * Sets the API base URL for chat requests.
+ * @param {string} url
+ */
+export function setApiUrl(url) {
+  apiUrl = url;
+}
 
 /**
  * Sets the SKU list for the current session.
@@ -21,11 +30,14 @@ export function setSkus(skuList) {
  * @param {string} text
  */
 export async function sendMessage(text) {
+  if (sending) return;
+  sending = true;
+
   try {
     const isFirstMessage = !sessionId;
 
     if (isFirstMessage) {
-      sessionId = `session-${Date.now()}`;
+      sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     }
 
     const body = { message: text, sessionId };
@@ -34,7 +46,7 @@ export async function sendMessage(text) {
       body.skus = skus;
     }
 
-    const res = await fetch(API_URL, {
+    const res = await fetch(apiUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -42,13 +54,13 @@ export async function sendMessage(text) {
 
     const data = await res.json();
 
-    if (!res.ok) {
-      throw new Error(data.error || 'API hatası');
+    if (!data.success) {
+      throw new Error(data.error?.message || 'API hatası');
     }
 
     const botMessage = {
       id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      text: data.reply,
+      text: data.data.reply,
       sender: 'bot',
       timestamp: new Date(),
     };
@@ -62,6 +74,8 @@ export async function sendMessage(text) {
       timestamp: new Date(),
     };
     listeners.forEach((cb) => cb(errorMessage));
+  } finally {
+    sending = false;
   }
 }
 

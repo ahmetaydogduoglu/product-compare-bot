@@ -2,7 +2,7 @@
 
 <script>
   import { onMount, onDestroy, afterUpdate, tick, createEventDispatcher } from 'svelte';
-  import { sendMessage, onMessage, setSkus } from '../services/chatService.js';
+  import { sendMessage, onMessage, setSkus, setApiUrl } from '../services/chatService.js';
   import { scrollToBottom } from '../utils/scrollHelper.js';
   import { marked } from 'marked';
 
@@ -11,6 +11,7 @@
   export let title = 'Chat';
   export let placeholder = 'Mesajınızı yazın...';
   export let theme = 'light';
+  export let apiurl = 'http://localhost:3001/api/chat';
 
   const dispatch = createEventDispatcher();
 
@@ -27,7 +28,24 @@
   function sanitizeHtml(html) {
     const div = document.createElement('div');
     div.innerHTML = html;
-    div.querySelectorAll('script,iframe,object,embed,form').forEach(el => el.remove());
+
+    // Remove dangerous elements
+    div.querySelectorAll('script,iframe,object,embed,form,style').forEach(el => el.remove());
+
+    // Strip event handler attributes and dangerous URLs from all elements
+    div.querySelectorAll('*').forEach(el => {
+      for (const attr of [...el.attributes]) {
+        const name = attr.name.toLowerCase();
+        if (name.startsWith('on')) {
+          el.removeAttribute(attr.name);
+        }
+        if ((name === 'href' || name === 'src' || name === 'action') &&
+            /^\s*(javascript|data):/i.test(attr.value)) {
+          el.removeAttribute(attr.name);
+        }
+      }
+    });
+
     return div.innerHTML;
   }
 
@@ -54,6 +72,7 @@
   }
 
   onMount(() => {
+    setApiUrl(apiurl);
     unsubscribe = onMessage((msg) => {
       messages = [...messages, msg];
       loading = false;
