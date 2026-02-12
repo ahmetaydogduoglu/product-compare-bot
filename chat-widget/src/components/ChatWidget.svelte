@@ -2,7 +2,7 @@
 
 <script>
   import { onMount, onDestroy, afterUpdate, tick, createEventDispatcher } from 'svelte';
-  import { sendMessage, onMessage, setSkus, setApiUrl } from '../services/chatService.js';
+  import { sendMessage, onMessage, onDelta, setSkus, setApiUrl } from '../services/chatService.js';
   import { scrollToBottom } from '../utils/scrollHelper.js';
   import { marked } from 'marked';
 
@@ -19,10 +19,13 @@
   let messages = [];
   let inputText = '';
   let loading = false;
+  let streaming = false;
+  let streamingMessageId = null;
   let listContainer;
   let inputEl;
   let fabEl;
   let unsubscribe;
+  let unsubDelta;
   let nextId = 0;
 
   function sanitizeHtml(html) {
@@ -73,15 +76,47 @@
 
   onMount(() => {
     setApiUrl(apiurl);
-    unsubscribe = onMessage((msg) => {
-      messages = [...messages, msg];
-      loading = false;
+
+    unsubDelta = onDelta((delta) => {
+      // First delta: remove typing indicator, add streaming message
+      if (!streamingMessageId || streamingMessageId !== delta.id) {
+        streamingMessageId = delta.id;
+        loading = false;
+        streaming = true;
+        messages = [...messages, { id: delta.id, text: delta.text, sender: 'bot', timestamp: delta.timestamp }];
+      } else {
+        // Update existing streaming message
+        const idx = messages.findIndex((m) => m.id === delta.id);
+        if (idx !== -1) {
+          messages[idx] = { ...messages[idx], text: delta.text };
+          messages = messages;
+        }
+      }
     });
+
+    unsubscribe = onMessage((msg) => {
+      // If streaming was active, finalize the message text
+      if (streamingMessageId === msg.id) {
+        const idx = messages.findIndex((m) => m.id === msg.id);
+        if (idx !== -1) {
+          messages[idx] = { ...messages[idx], text: msg.text };
+          messages = messages;
+        }
+      } else {
+        // Non-streamed message (error or JSON fallback)
+        messages = [...messages, msg];
+      }
+      loading = false;
+      streaming = false;
+      streamingMessageId = null;
+    });
+
     document.addEventListener('set-skus', handleSetSkus);
   });
 
   onDestroy(() => {
     if (unsubscribe) unsubscribe();
+    if (unsubDelta) unsubDelta();
     document.removeEventListener('set-skus', handleSetSkus);
   });
 
@@ -171,9 +206,9 @@
           bind:this={inputEl}
           on:keydown={handleKeydown}
           {placeholder}
-          disabled={loading}
+          disabled={loading || streaming}
         />
-        <button on:click={handleSend} disabled={loading || !inputText.trim()} aria-label="Gonder">
+        <button on:click={handleSend} disabled={loading || streaming || !inputText.trim()} aria-label="Gonder">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="22" y1="2" x2="11" y2="13" />
             <polygon points="22 2 15 22 11 13 2 9 22 2" />

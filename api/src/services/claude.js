@@ -195,6 +195,111 @@ async function chat(sessionId, userMessage) {
 }
 
 /**
+ * Sends a user message within an existing session and streams Claude's reply
+ * via handler callbacks. Supports multi-round tool use with streaming.
+ * @param {string} sessionId
+ * @param {string} userMessage
+ * @param {object} handler - Callback handlers
+ * @param {function} handler.onTextDelta - Called with each text token chunk
+ * @param {function} handler.onToolStart - Called with (toolName, round) when a tool starts
+ * @param {function} handler.onToolEnd - Called with (toolName, round) when a tool finishes
+ * @param {function} handler.onDone - Called when streaming is complete
+ * @param {function} handler.onError - Called with error on failure
+ * @param {AbortSignal} [handler.signal] - Optional AbortSignal for cancellation
+ */
+async function chatStream(sessionId, userMessage, handler) {
+  const session = sessions.get(sessionId);
+  if (!session) {
+    handler.onError(new Error(`Session bulunamadı: ${sessionId}`));
+    return;
+  }
+
+  const enrichedMessage = `[sessionId: ${sessionId}]\n${userMessage}`;
+  session.messages.push({ role: 'user', content: enrichedMessage });
+  session.lastActivity = Date.now();
+
+  if (session.messages.length > MAX_MESSAGES) {
+    session.messages = session.messages.slice(-MAX_MESSAGES);
+  }
+
+  const tools = await mcpClient.getTools();
+  let fullAssistantText = '';
+  let rounds = 0;
+  let continueLoop = true;
+
+  try {
+    while (continueLoop) {
+      if (handler.signal?.aborted) return;
+
+      const params = {
+        model: MODEL,
+        max_tokens: MAX_TOKENS,
+        system: buildSystemPrompt(session.products),
+        messages: session.messages,
+      };
+
+      if (tools.length > 0) {
+        params.tools = tools;
+      }
+
+      const stream = client.messages.stream(params);
+
+      stream.on('text', (delta) => {
+        if (handler.signal?.aborted) return;
+        fullAssistantText += delta;
+        handler.onTextDelta(delta);
+      });
+
+      const finalMessage = await stream.finalMessage();
+
+      if (finalMessage.stop_reason === 'tool_use' && rounds < MAX_TOOL_ROUNDS) {
+        rounds++;
+        session.messages.push({ role: 'assistant', content: finalMessage.content });
+
+        const toolResults = [];
+        for (const block of finalMessage.content) {
+          if (block.type === 'tool_use') {
+            if (handler.signal?.aborted) return;
+            handler.onToolStart(block.name, rounds);
+            try {
+              const result = await mcpClient.callTool(block.name, block.input);
+              const resultText = result.content
+                .map((c) => c.text || '')
+                .join('');
+
+              toolResults.push({
+                type: 'tool_result',
+                tool_use_id: block.id,
+                content: resultText,
+              });
+            } catch (error) {
+              toolResults.push({
+                type: 'tool_result',
+                tool_use_id: block.id,
+                content: `Tool hatası: ${error.message}`,
+                is_error: true,
+              });
+            }
+            handler.onToolEnd(block.name, rounds);
+          }
+        }
+
+        session.messages.push({ role: 'user', content: toolResults });
+        // Reset fullAssistantText for next round — text from tool_use rounds
+        // is intermediate; we keep accumulating across all rounds
+      } else {
+        continueLoop = false;
+      }
+    }
+
+    session.messages.push({ role: 'assistant', content: fullAssistantText });
+    handler.onDone();
+  } catch (err) {
+    handler.onError(err);
+  }
+}
+
+/**
  * Checks whether a session already exists.
  * @param {string} sessionId
  * @returns {boolean}
@@ -203,4 +308,4 @@ function hasSession(sessionId) {
   return sessions.has(sessionId);
 }
 
-module.exports = { ensureSession, addProducts, chat, hasSession };
+module.exports = { ensureSession, addProducts, chat, chatStream, hasSession };

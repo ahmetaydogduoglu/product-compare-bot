@@ -1,9 +1,11 @@
 const mockCreate = jest.fn();
+const mockStream = jest.fn();
 
 jest.mock('@anthropic-ai/sdk', () => {
   return jest.fn().mockImplementation(() => ({
     messages: {
       create: mockCreate,
+      stream: mockStream,
     },
   }));
 });
@@ -13,7 +15,7 @@ jest.mock('./mcpClient', () => ({
   callTool: jest.fn(),
 }));
 
-const { ensureSession, addProducts, chat, hasSession } = require('./claude');
+const { ensureSession, addProducts, chat, chatStream, hasSession } = require('./claude');
 const mcpClient = require('./mcpClient');
 
 describe('claude service', () => {
@@ -433,6 +435,168 @@ describe('claude service', () => {
       const expectedWithoutTrimming = 15 * 2 + 1; // (15 exchanges * 2 messages each) + new user message = 31
 
       expect(lastCallMessageCount).toBeLessThan(expectedWithoutTrimming);
+    });
+  });
+
+  describe('chatStream', () => {
+    /**
+     * Creates a mock stream object that simulates the Anthropic SDK streaming API.
+     * @param {string} text - Text to deliver via 'text' event
+     * @param {string} stopReason - Final message stop_reason
+     * @param {Array} [content] - Optional full content array for finalMessage
+     */
+    function createMockStream(text, stopReason, content) {
+      const handlers = {};
+      return {
+        on(event, handler) {
+          handlers[event] = handler;
+          // Deliver text chunks synchronously when 'text' handler is registered
+          if (event === 'text' && text) {
+            const chunks = text.match(/.{1,5}/g) || [];
+            for (const chunk of chunks) {
+              handler(chunk);
+            }
+          }
+          return this;
+        },
+        finalMessage() {
+          const finalContent = content || [{ type: 'text', text }];
+          return Promise.resolve({
+            content: finalContent,
+            stop_reason: stopReason,
+          });
+        },
+      };
+    }
+
+    it('should stream text deltas via onTextDelta', async () => {
+      const sid = `stream-text-${Date.now()}`;
+      ensureSession(sid);
+      addProducts(sid, [{ sku: 'SKU-IP15', name: 'iPhone 15 Pro' }]);
+
+      mockStream.mockReturnValue(
+        createMockStream('Hello streaming world', 'end_turn'),
+      );
+
+      const deltas = [];
+      const handler = {
+        onTextDelta: jest.fn((text) => deltas.push(text)),
+        onToolStart: jest.fn(),
+        onToolEnd: jest.fn(),
+        onDone: jest.fn(),
+        onError: jest.fn(),
+      };
+
+      await chatStream(sid, 'Test message', handler);
+
+      expect(handler.onTextDelta).toHaveBeenCalled();
+      expect(deltas.join('')).toBe('Hello streaming world');
+      expect(handler.onDone).toHaveBeenCalledTimes(1);
+      expect(handler.onError).not.toHaveBeenCalled();
+    });
+
+    it('should handle tool use loop with onToolStart and onToolEnd', async () => {
+      const sid = `stream-tool-${Date.now()}`;
+      ensureSession(sid);
+      addProducts(sid, [{ sku: 'SKU-IP15', name: 'iPhone 15 Pro' }]);
+
+      const mockTools = [
+        {
+          name: 'ecommerce_add_to_cart',
+          description: 'Add to cart',
+          input_schema: { type: 'object', properties: {} },
+        },
+      ];
+      mcpClient.getTools.mockResolvedValue(mockTools);
+
+      // First stream: tool use response
+      const toolUseContent = [
+        { type: 'text', text: 'Adding...' },
+        {
+          type: 'tool_use',
+          id: 'tool_1',
+          name: 'ecommerce_add_to_cart',
+          input: { userId: 'test', sku: 'SKU-IP15', quantity: 1 },
+        },
+      ];
+      const firstStream = createMockStream('Adding...', 'tool_use', toolUseContent);
+
+      // Second stream: final text
+      const secondStream = createMockStream('Eklendi!', 'end_turn');
+
+      mockStream
+        .mockReturnValueOnce(firstStream)
+        .mockReturnValueOnce(secondStream);
+
+      mcpClient.callTool.mockResolvedValue({
+        content: [{ type: 'text', text: 'Success' }],
+      });
+
+      const handler = {
+        onTextDelta: jest.fn(),
+        onToolStart: jest.fn(),
+        onToolEnd: jest.fn(),
+        onDone: jest.fn(),
+        onError: jest.fn(),
+      };
+
+      await chatStream(sid, 'Add to cart', handler);
+
+      // Should create 2 streams (initial + after tool)
+      expect(mockStream).toHaveBeenCalledTimes(2);
+
+      // Should call tool lifecycle callbacks
+      expect(handler.onToolStart).toHaveBeenCalledWith('ecommerce_add_to_cart', 1);
+      expect(handler.onToolEnd).toHaveBeenCalledWith('ecommerce_add_to_cart', 1);
+
+      // Should call the actual tool
+      expect(mcpClient.callTool).toHaveBeenCalledWith(
+        'ecommerce_add_to_cart',
+        { userId: 'test', sku: 'SKU-IP15', quantity: 1 },
+      );
+
+      expect(handler.onDone).toHaveBeenCalledTimes(1);
+      expect(handler.onError).not.toHaveBeenCalled();
+    });
+
+    it('should call onError for non-existent session', async () => {
+      const handler = {
+        onTextDelta: jest.fn(),
+        onToolStart: jest.fn(),
+        onToolEnd: jest.fn(),
+        onDone: jest.fn(),
+        onError: jest.fn(),
+      };
+
+      await chatStream('non-existent-session', 'hello', handler);
+
+      expect(handler.onError).toHaveBeenCalledTimes(1);
+      expect(handler.onError.mock.calls[0][0].message).toContain('Session bulunamadı');
+      expect(handler.onDone).not.toHaveBeenCalled();
+    });
+
+    it('should call onError when stream throws', async () => {
+      const sid = `stream-err-${Date.now()}`;
+      ensureSession(sid);
+      addProducts(sid, [{ sku: 'SKU-IP15', name: 'iPhone 15 Pro' }]);
+
+      mockStream.mockImplementation(() => {
+        throw new Error('API connection failed');
+      });
+
+      const handler = {
+        onTextDelta: jest.fn(),
+        onToolStart: jest.fn(),
+        onToolEnd: jest.fn(),
+        onDone: jest.fn(),
+        onError: jest.fn(),
+      };
+
+      await chatStream(sid, 'Test', handler);
+
+      expect(handler.onError).toHaveBeenCalledTimes(1);
+      expect(handler.onError.mock.calls[0][0].message).toBe('API connection failed');
+      expect(handler.onDone).not.toHaveBeenCalled();
     });
   });
 });
