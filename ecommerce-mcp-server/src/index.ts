@@ -10,7 +10,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
-// Constants
+// Base URL for the e-commerce mock API
 const ECOMMERCE_API_BASE = process.env.ECOMMERCE_API_URL || 'http://localhost:3002';
 
 // Interfaces
