@@ -440,6 +440,55 @@ Error Handling:
   },
 );
 
+server.registerTool(
+  'ecommerce_clear_cart',
+  {
+    title: 'Clear Cart',
+    description: `Remove all products from the user's shopping cart at once.
+
+Args:
+  - userId (string): The unique identifier of the user (session ID)
+
+Returns:
+  JSON object with clearing confirmation:
+  {
+    "cleared": true,
+    "itemsRemoved": number,
+    "message": string
+  }
+
+Examples:
+  - Use when: "Clear my cart" -> params with userId from session
+  - Use when: "Remove everything from my cart" -> params with userId from session
+  - Use when: "Empty my shopping cart" -> params with userId from session
+  - Don't use when: User wants to remove a single item (use ecommerce_remove_from_cart instead)
+
+Error Handling:
+  - Returns success even if cart is already empty (itemsRemoved: 0)
+  - Returns error if the API is unreachable`,
+    inputSchema: UserIdSchema,
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  async ({ userId }: UserIdInput) => {
+    try {
+      const result = await makeApiRequest('/api/cart/clear', 'DELETE', { userId });
+
+      if (!result.success) {
+        return formatError(`Hata: ${result.error?.message || 'Bilinmeyen hata'}`);
+      }
+
+      return formatSuccess(result.data);
+    } catch (error) {
+      return formatError(handleApiError(error));
+    }
+  },
+);
+
 // Start the server with stdio transport
 async function main(): Promise<void> {
   const transport = new StdioServerTransport();

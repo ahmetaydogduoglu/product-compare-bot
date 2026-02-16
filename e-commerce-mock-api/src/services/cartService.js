@@ -158,4 +158,22 @@ function removeFromCart(userId, sku) {
   };
 }
 
-module.exports = { getCart, addToCart, updateQuantity, removeFromCart };
+/**
+ * Removes all products from the user's cart.
+ * Returns success even if the cart is already empty.
+ * @param {string} userId - The user identifier
+ * @returns {{ cleared: boolean, itemsRemoved: number, message: string }}
+ */
+function clearCart(userId) {
+  const cart = carts.get(userId);
+  const itemsRemoved = cart ? cart.length : 0;
+  carts.delete(userId);
+
+  return {
+    cleared: true,
+    itemsRemoved,
+    message: `${itemsRemoved} ürün sepetten çıkarıldı`,
+  };
+}
+
+module.exports = { getCart, addToCart, updateQuantity, removeFromCart, clearCart };

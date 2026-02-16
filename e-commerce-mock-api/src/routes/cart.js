@@ -1,5 +1,5 @@
 const { Router } = require('express');
-const { getCart, addToCart, updateQuantity, removeFromCart } = require('../services/cartService');
+const { getCart, addToCart, updateQuantity, removeFromCart, clearCart } = require('../services/cartService');
 
 const router = Router();
 
@@ -128,6 +128,43 @@ router.patch('/', (req, res) => {
       });
     }
     console.error('Update cart error:', err);
+    res.status(500).json({
+      success: false,
+      data: null,
+      error: { message: 'Bir hata oluştu', code: 'INTERNAL_ERROR' },
+      statusCode: 500,
+    });
+  }
+});
+
+/**
+ * DELETE /api/cart/clear
+ * Removes all products from the user's cart.
+ * Body: { userId: string }
+ */
+router.delete('/clear', (req, res) => {
+  try {
+    const { userId } = req.body;
+
+    if (!userId || typeof userId !== 'string') {
+      return res.status(400).json({
+        success: false,
+        data: null,
+        error: { message: 'userId gerekli (string)', code: 'MISSING_FIELDS' },
+        statusCode: 400,
+      });
+    }
+
+    const result = clearCart(userId);
+
+    res.json({
+      success: true,
+      data: result,
+      error: null,
+      statusCode: 200,
+    });
+  } catch (err) {
+    console.error('Clear cart error:', err);
     res.status(500).json({
       success: false,
       data: null,

@@ -187,6 +187,10 @@ refactor(api): extract error handling middleware
 3. **Test** the changes
 4. **Commit** with conventional commit message
 
+### MCP Server Development
+
+When building or modifying MCP servers, **always use the `/mcp-builder` skill first**. Invoke it via the Skill tool before writing any code. The skill contains up-to-date conventions, correct API patterns (e.g. `registerTool()` vs deprecated `server.tool()`), and reference documentation that must be followed.
+
 ## Available SKUs
 
 | SKU       | Product                         | Category | Price      |
