@@ -72,7 +72,7 @@ type AddToCartInput = z.infer<typeof AddToCartSchema>;
  */
 async function makeApiRequest(
   endpoint: string,
-  method: 'GET' | 'POST' | 'DELETE',
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
   body?: Record<string, unknown>,
 ): Promise<ApiResponse> {
   const url = `${ECOMMERCE_API_BASE}${endpoint}`;
