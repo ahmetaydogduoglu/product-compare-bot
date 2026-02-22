@@ -15,7 +15,7 @@ jest.mock('./mcpClient', () => ({
   callTool: jest.fn(),
 }));
 
-const { ensureSession, addProducts, chat, chatStream, hasSession } = require('./claude');
+const { ensureSession, addProducts, chat, chatStream, hasSession, resetToolsCache } = require('./claude');
 const mcpClient = require('./mcpClient');
 
 describe('claude service', () => {
@@ -24,6 +24,8 @@ describe('claude service', () => {
   beforeEach(() => {
     // Reset mocks before each test
     jest.clearAllMocks();
+    // Reset tool cache so each test gets a fresh getTools() call
+    resetToolsCache();
     // Default mock: simple text response with end_turn
     mockCreate.mockResolvedValue({
       content: [{ type: 'text', text: 'Mock comparison response' }],
@@ -118,19 +120,21 @@ describe('claude service', () => {
         .rejects.toThrow('Session bulunamadı');
     });
 
-    it('should inject sessionId into user message', async () => {
+    it('should inject sessionId into system prompt for tool calls', async () => {
       const sid = `inject-${Date.now()}`;
       ensureSession(sid);
       addProducts(sid, [{ sku: 'SKU-IP15', name: 'iPhone 15 Pro' }]);
 
       await chat(sid, 'Add this to cart');
 
-      // Check that the first call received enriched message
       const callArgs = mockCreate.mock.calls[0][0];
+      // sessionId must be in system prompt so Claude uses it as userId in tool calls
+      expect(callArgs.system).toContain(sid);
+      // User message must be clean — no injected prefix
       const firstUserMessage = callArgs.messages[0];
       expect(firstUserMessage.role).toBe('user');
-      expect(firstUserMessage.content).toContain(`[sessionId: ${sid}]`);
-      expect(firstUserMessage.content).toContain('Add this to cart');
+      expect(firstUserMessage.content).toBe('Add this to cart');
+      expect(firstUserMessage.content).not.toContain('[sessionId:');
     });
 
     it('should include tools in API call when available', async () => {

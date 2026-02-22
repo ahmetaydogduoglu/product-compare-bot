@@ -12,6 +12,20 @@ const MAX_TOOL_ROUNDS = 5;
 // sessionId → { products: Map<sku, product>, messages: Array, lastActivity: number }
 const sessions = new Map();
 
+// Tool definitions are static per server lifecycle — cache after first fetch
+let cachedTools = null;
+
+/**
+ * Returns MCP tools, fetching once and caching for subsequent calls.
+ * @returns {Promise<object[]>}
+ */
+async function getToolsCached() {
+  if (!cachedTools) {
+    cachedTools = await mcpClient.getTools();
+  }
+  return cachedTools;
+}
+
 /**
  * Removes sessions that have been inactive longer than SESSION_TTL_MS.
  * Runs automatically every 5 minutes.
@@ -31,9 +45,10 @@ cleanupInterval.unref();
 /**
  * Builds the system prompt including product data and tool usage instructions.
  * @param {Map} products - Map of SKU to product objects
+ * @param {string} sessionId - Current user's session ID, used as userId in tool calls
  * @returns {string} System prompt for Claude
  */
-function buildSystemPrompt(products) {
+function buildSystemPrompt(products, sessionId) {
   const productBlock = JSON.stringify([...products.values()], null, 2);
 
   return `Sen bir ürün karşılaştırma asistanısın. Kullanıcıya ürünleri karşılaştırmasında yardımcı oluyorsun.
@@ -53,7 +68,7 @@ Görevlerin:
 Sepet ve Favori İşlemleri:
 - Kullanıcı bir ürünü beğendiğinde "Bu ürünü sepetine veya favorilerine eklememi ister misin?" diye teklif et
 - Kullanıcı kabul ederse ilgili tool'u çağır
-- Tool çağrılarında userId olarak mesajdaki [sessionId: xxx] değerini kullan
+- Tool çağrılarında userId olarak "${sessionId}" değerini kullan
 - Sepete eklemede varsayılan miktar 1'dir
 - Tool sonuçlarını Türkçe olarak kullanıcıya bildir (örn: "iPhone 15 Pro sepetine eklendi!")
 - Hata durumlarında kullanıcıyı nazikçe bilgilendir (örn: "Bu ürün zaten favorilerinde.")`;
@@ -105,9 +120,9 @@ async function chat(sessionId, userMessage) {
     throw new Error(`Session bulunamadı: ${sessionId}`);
   }
 
-  // Inject sessionId so Claude can use it as userId for tool calls
-  const enrichedMessage = `[sessionId: ${sessionId}]\n${userMessage}`;
-  session.messages.push({ role: 'user', content: enrichedMessage });
+  // Save snapshot to restore if the API call fails
+  const previousMessages = session.messages;
+  session.messages = [...session.messages, { role: 'user', content: userMessage }];
   session.lastActivity = Date.now();
 
   // Keep only the last MAX_MESSAGES to prevent unbounded growth
@@ -115,13 +130,13 @@ async function chat(sessionId, userMessage) {
     session.messages = session.messages.slice(-MAX_MESSAGES);
   }
 
-  // Fetch MCP tools (graceful fallback to empty array)
-  const tools = await mcpClient.getTools();
+  // Fetch MCP tools (cached after first call)
+  const tools = await getToolsCached();
 
   const createParams = {
     model: MODEL,
     max_tokens: MAX_TOKENS,
-    system: buildSystemPrompt(session.products),
+    system: buildSystemPrompt(session.products, sessionId),
     messages: session.messages,
   };
 
@@ -129,7 +144,15 @@ async function chat(sessionId, userMessage) {
     createParams.tools = tools;
   }
 
-  let response = await client.messages.create(createParams);
+  let response;
+  try {
+    response = await client.messages.create(createParams);
+  } catch (error) {
+    // Restore session to avoid an orphaned user message with no assistant reply
+    session.messages = previousMessages;
+    throw error;
+  }
+
   let rounds = 0;
 
   // Tool use loop: keep executing tools until Claude gives a final response
@@ -172,7 +195,7 @@ async function chat(sessionId, userMessage) {
     const nextParams = {
       model: MODEL,
       max_tokens: MAX_TOKENS,
-      system: buildSystemPrompt(session.products),
+      system: buildSystemPrompt(session.products, sessionId),
       messages: session.messages,
     };
 
@@ -214,15 +237,17 @@ async function chatStream(sessionId, userMessage, handler) {
     return;
   }
 
-  const enrichedMessage = `[sessionId: ${sessionId}]\n${userMessage}`;
-  session.messages.push({ role: 'user', content: enrichedMessage });
+  // Save snapshot to restore if an error occurs mid-stream
+  const previousMessages = session.messages;
+  session.messages = [...session.messages, { role: 'user', content: userMessage }];
   session.lastActivity = Date.now();
 
   if (session.messages.length > MAX_MESSAGES) {
     session.messages = session.messages.slice(-MAX_MESSAGES);
   }
 
-  const tools = await mcpClient.getTools();
+  // Fetch MCP tools (cached after first call)
+  const tools = await getToolsCached();
   let fullAssistantText = '';
   let rounds = 0;
   let continueLoop = true;
@@ -231,10 +256,14 @@ async function chatStream(sessionId, userMessage, handler) {
     while (continueLoop) {
       if (handler.signal?.aborted) return;
 
+      // Reset per-round text so only the final round's text is stored in session history.
+      // Intermediate tool_use rounds are already stored via finalMessage.content below.
+      fullAssistantText = '';
+
       const params = {
         model: MODEL,
         max_tokens: MAX_TOKENS,
-        system: buildSystemPrompt(session.products),
+        system: buildSystemPrompt(session.products, sessionId),
         messages: session.messages,
       };
 
@@ -254,6 +283,7 @@ async function chatStream(sessionId, userMessage, handler) {
 
       if (finalMessage.stop_reason === 'tool_use' && rounds < MAX_TOOL_ROUNDS) {
         rounds++;
+        // Push full assistant content (text + tool_use blocks) for this intermediate round
         session.messages.push({ role: 'assistant', content: finalMessage.content });
 
         const toolResults = [];
@@ -285,16 +315,17 @@ async function chatStream(sessionId, userMessage, handler) {
         }
 
         session.messages.push({ role: 'user', content: toolResults });
-        // Reset fullAssistantText for next round — text from tool_use rounds
-        // is intermediate; we keep accumulating across all rounds
       } else {
         continueLoop = false;
       }
     }
 
+    // Push only the final round's streamed text
     session.messages.push({ role: 'assistant', content: fullAssistantText });
     handler.onDone();
   } catch (err) {
+    // Restore session to avoid an orphaned user message with no assistant reply
+    session.messages = previousMessages;
     handler.onError(err);
   }
 }
@@ -308,4 +339,11 @@ function hasSession(sessionId) {
   return sessions.has(sessionId);
 }
 
-module.exports = { ensureSession, addProducts, chat, chatStream, hasSession };
+/**
+ * Resets the cached MCP tools. Intended for use in tests only.
+ */
+function resetToolsCache() {
+  cachedTools = null;
+}
+
+module.exports = { ensureSession, addProducts, chat, chatStream, hasSession, resetToolsCache };
