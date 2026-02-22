@@ -172,6 +172,84 @@ describe('claude service', () => {
       const callArgs = mockCreate.mock.calls[0][0];
       expect(callArgs.tools).toBeUndefined();
     });
+
+    it('should call mcpClient.getTools only once across multiple chat() calls (cache hit)', async () => {
+      const sid = `cache-${Date.now()}`;
+      ensureSession(sid);
+      addProducts(sid, [{ sku: 'SKU-IP15', name: 'iPhone 15 Pro' }]);
+
+      // Arrange: provide a tool so the cache is populated on first call
+      const mockTools = [
+        {
+          name: 'ecommerce_add_to_cart',
+          description: 'Add item to cart',
+          input_schema: { type: 'object', properties: {} },
+        },
+      ];
+      mcpClient.getTools.mockResolvedValue(mockTools);
+
+      mockCreate
+        .mockResolvedValueOnce({
+          content: [{ type: 'text', text: 'Reply 1' }],
+          stop_reason: 'end_turn',
+        })
+        .mockResolvedValueOnce({
+          content: [{ type: 'text', text: 'Reply 2' }],
+          stop_reason: 'end_turn',
+        })
+        .mockResolvedValueOnce({
+          content: [{ type: 'text', text: 'Reply 3' }],
+          stop_reason: 'end_turn',
+        });
+
+      // Act: three consecutive messages in the same session
+      await chat(sid, 'Message 1');
+      await chat(sid, 'Message 2');
+      await chat(sid, 'Message 3');
+
+      // Assert: getTools must have been fetched exactly once regardless of call count
+      expect(mcpClient.getTools).toHaveBeenCalledTimes(1);
+    });
+
+    it('should restore session messages when Claude API call throws', async () => {
+      const sid = `restore-chat-${Date.now()}`;
+      ensureSession(sid);
+      addProducts(sid, [{ sku: 'SKU-IP15', name: 'iPhone 15 Pro' }]);
+
+      // Capture deep copies of messages at the moment create() is called, before
+      // any post-call mutations (Jest stores references, not snapshots).
+      const capturedMessages = [];
+      mockCreate
+        .mockImplementationOnce((params) => {
+          capturedMessages.push(JSON.parse(JSON.stringify(params.messages)));
+          return Promise.reject(new Error('Network error'));
+        })
+        .mockImplementationOnce((params) => {
+          capturedMessages.push(JSON.parse(JSON.stringify(params.messages)));
+          return Promise.resolve({
+            content: [{ type: 'text', text: 'OK' }],
+            stop_reason: 'end_turn',
+          });
+        });
+
+      // Act: first call must throw
+      await expect(chat(sid, 'First message')).rejects.toThrow('Network error');
+
+      // Act: second call — session must be clean (no orphaned user message from first call)
+      await chat(sid, 'Second message');
+
+      // Assert: both calls were made
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+
+      // The first create() call received ['First message'] — one user message
+      expect(capturedMessages[0]).toHaveLength(1);
+      expect(capturedMessages[0][0]).toEqual({ role: 'user', content: 'First message' });
+
+      // The second create() call received only ['Second message'] — proving the session
+      // was restored to its pre-failure state and 'First message' was not left behind.
+      expect(capturedMessages[1]).toHaveLength(1);
+      expect(capturedMessages[1][0]).toEqual({ role: 'user', content: 'Second message' });
+    });
   });
 
   describe('chat - tool use loop', () => {
@@ -601,6 +679,142 @@ describe('claude service', () => {
       expect(handler.onError).toHaveBeenCalledTimes(1);
       expect(handler.onError.mock.calls[0][0].message).toBe('API connection failed');
       expect(handler.onDone).not.toHaveBeenCalled();
+    });
+
+    it('should restore session messages when stream throws mid-flight', async () => {
+      const sid = `restore-stream-${Date.now()}`;
+      ensureSession(sid);
+      addProducts(sid, [{ sku: 'SKU-IP15', name: 'iPhone 15 Pro' }]);
+
+      // Capture deep copies of messages at the moment stream() is called, before
+      // any post-call mutations (Jest stores references, not snapshots).
+      const capturedMessages = [];
+
+      // Arrange: first stream call throws — catch block in chatStream restores previousMessages
+      mockStream.mockImplementationOnce((params) => {
+        capturedMessages.push(JSON.parse(JSON.stringify(params.messages)));
+        throw new Error('Stream connection lost');
+      });
+
+      const failHandler = {
+        onTextDelta: jest.fn(),
+        onToolStart: jest.fn(),
+        onToolEnd: jest.fn(),
+        onDone: jest.fn(),
+        onError: jest.fn(),
+      };
+
+      // Act: first call must invoke onError and leave the session clean
+      await chatStream(sid, 'First stream message', failHandler);
+      expect(failHandler.onError).toHaveBeenCalledTimes(1);
+
+      // Arrange: second stream call succeeds; also capture its messages snapshot
+      mockStream.mockImplementationOnce((params) => {
+        capturedMessages.push(JSON.parse(JSON.stringify(params.messages)));
+        return createMockStream('Recovery response', 'end_turn');
+      });
+
+      const successHandler = {
+        onTextDelta: jest.fn(),
+        onToolStart: jest.fn(),
+        onToolEnd: jest.fn(),
+        onDone: jest.fn(),
+        onError: jest.fn(),
+      };
+
+      // Act: second call — session must be clean (no orphaned user message)
+      await chatStream(sid, 'Second stream message', successHandler);
+
+      // Assert: both stream() calls were made
+      expect(mockStream).toHaveBeenCalledTimes(2);
+
+      // First stream() received ['First stream message'] — one user message
+      expect(capturedMessages[0]).toHaveLength(1);
+      expect(capturedMessages[0][0]).toEqual({ role: 'user', content: 'First stream message' });
+
+      // Second stream() received only ['Second stream message'] — proving the session
+      // was restored to its pre-failure state and 'First stream message' was not left behind.
+      expect(capturedMessages[1]).toHaveLength(1);
+      expect(capturedMessages[1][0]).toEqual({ role: 'user', content: 'Second stream message' });
+      expect(successHandler.onError).not.toHaveBeenCalled();
+      expect(successHandler.onDone).toHaveBeenCalledTimes(1);
+    });
+
+    it('should store only the final round text in session history after a tool-use round', async () => {
+      const sid = `stream-final-text-${Date.now()}`;
+      ensureSession(sid);
+      addProducts(sid, [{ sku: 'SKU-IP15', name: 'iPhone 15 Pro' }]);
+
+      const mockTools = [
+        {
+          name: 'ecommerce_add_to_cart',
+          description: 'Add to cart',
+          input_schema: { type: 'object', properties: {} },
+        },
+      ];
+      mcpClient.getTools.mockResolvedValue(mockTools);
+
+      // Round 1: tool_use round — streams intermediate text 'Adding to cart now...'
+      const toolUseContent = [
+        { type: 'text', text: 'Adding to cart now...' },
+        {
+          type: 'tool_use',
+          id: 'tool_1',
+          name: 'ecommerce_add_to_cart',
+          input: { userId: sid, sku: 'SKU-IP15', quantity: 1 },
+        },
+      ];
+      const firstStream = createMockStream('Adding to cart now...', 'tool_use', toolUseContent);
+
+      // Round 2: final text — streams 'Eklendi!'
+      // Capture session.messages snapshot at the moment the second stream() call is made.
+      // At this point the final assistant text has NOT yet been pushed, so we can inspect
+      // what the session history looks like before the final push happens.
+      let messagesAtRound2Call = null;
+      const secondStreamImpl = (params) => {
+        messagesAtRound2Call = JSON.parse(JSON.stringify(params.messages));
+        return createMockStream('Eklendi!', 'end_turn');
+      };
+
+      mockStream
+        .mockReturnValueOnce(firstStream)
+        .mockImplementationOnce(secondStreamImpl);
+
+      mcpClient.callTool.mockResolvedValue({
+        content: [{ type: 'text', text: 'Successfully added' }],
+      });
+
+      const handler = {
+        onTextDelta: jest.fn(),
+        onToolStart: jest.fn(),
+        onToolEnd: jest.fn(),
+        onDone: jest.fn(),
+        onError: jest.fn(),
+      };
+
+      await chatStream(sid, 'Add iPhone to cart', handler);
+
+      expect(handler.onDone).toHaveBeenCalledTimes(1);
+      expect(handler.onError).not.toHaveBeenCalled();
+
+      // Assert: session history entering round 2 should be:
+      //   [user: 'Add iPhone to cart'] + [assistant: tool_use content] + [user: tool_results]
+      // There must be NO extra assistant text message between the tool_use assistant block
+      // and the tool_result user block — which would indicate fullAssistantText leaked across rounds.
+      expect(messagesAtRound2Call).not.toBeNull();
+
+      const round2AssistantMessages = messagesAtRound2Call.filter((m) => m.role === 'assistant');
+      // Only one assistant message at round 2 entry: the tool_use round content array
+      expect(round2AssistantMessages).toHaveLength(1);
+      // It must be the structured content array (tool_use block), not a plain text string
+      expect(Array.isArray(round2AssistantMessages[0].content)).toBe(true);
+
+      // Also verify the onTextDelta callbacks: round 1 text AND round 2 text are both streamed.
+      // If fullAssistantText were not reset, the second round would still stream correctly
+      // but session history would be wrong. The round2 messages snapshot is the definitive check.
+      const allDeltaText = handler.onTextDelta.mock.calls.map((c) => c[0]).join('');
+      expect(allDeltaText).toContain('Adding to cart now...');
+      expect(allDeltaText).toContain('Eklendi!');
     });
   });
 });

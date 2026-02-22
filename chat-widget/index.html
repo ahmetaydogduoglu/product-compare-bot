@@ -26,12 +26,53 @@
     }
     .sku-btn:hover { border-color: #4f46e5; }
     #compare-btn:disabled { background: #9ca3af; cursor: not-allowed; }
+    .cat-btn {
+      padding: 6px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 20px;
+      background: #fff;
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.15s;
+    }
+    .cat-btn:hover { border-color: #4f46e5; }
+    .cat-btn.active {
+      background: #4f46e5;
+      color: #fff;
+      border-color: #4f46e5;
+    }
   </style>
 </head>
 <body>
   <div>
     <h2>Ürün Seçimi</h2>
-    <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px;">
+
+    <!-- Search bar -->
+    <div style="position: relative; display: inline-flex; align-items: center; margin-bottom: 10px;">
+      <input type="text" id="search-input" placeholder="Ürün veya marka ara..."
+             style="padding: 8px 32px 8px 12px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 13px; width: 220px;" />
+      <button id="search-clear" aria-label="Aramayı temizle"
+              style="position: absolute; right: 8px; background: none; border: none; cursor: pointer; display: none; font-size: 16px; color: #6b7280; line-height: 1;">×</button>
+    </div>
+
+    <!-- Category pills and price dropdown -->
+    <div style="display: flex; gap: 6px; align-items: center; margin-bottom: 10px; flex-wrap: wrap;">
+      <button class="cat-btn active" data-category="">Tümü</button>
+      <button class="cat-btn" data-category="Telefon">Telefon</button>
+      <button class="cat-btn" data-category="Laptop">Laptop</button>
+
+      <!-- Price dropdown -->
+      <select id="price-filter" style="padding: 6px 10px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 13px;">
+        <option value="">Tüm Fiyatlar</option>
+        <option value="40000">40.000 TL'ye kadar</option>
+        <option value="45000">45.000 TL'ye kadar</option>
+        <option value="50000">50.000 TL'ye kadar</option>
+        <option value="55000">55.000 TL'ye kadar</option>
+      </select>
+    </div>
+
+    <!-- Product button grid -->
+    <div id="product-grid" style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px;">
       <button class="sku-btn" data-sku="SKU-IP15">iPhone 15 Pro</button>
       <button class="sku-btn" data-sku="SKU-S24">Galaxy S24 Ultra</button>
       <button class="sku-btn" data-sku="SKU-P9">Pixel 9 Pro</button>
@@ -39,19 +80,88 @@
       <button class="sku-btn" data-sku="SKU-TP14">ThinkPad X1 Carbon</button>
       <button class="sku-btn" data-sku="SKU-XPS15">Dell XPS 15</button>
     </div>
+
+    <!-- Empty state -->
+    <div id="no-results" style="display: none; font-size: 13px; color: #6b7280; padding: 8px 0; margin-bottom: 20px;">
+      Ürün bulunamadı
+    </div>
+
     <div id="selected" style="font-size: 13px; color: #6b7280; margin-bottom: 12px;"></div>
     <button id="compare-btn" disabled style="padding: 8px 16px; background: #4f46e5; color: #fff; border: none; border-radius: 8px; cursor: pointer; font-size: 14px;">
-      Karsilastir
+      Karşılaştır
     </button>
   </div>
 
-  <chat-widget title="Urun Karsilastirma" placeholder="Bir soru sorun..."></chat-widget>
+  <chat-widget title="Ürün Karşılaştırma" placeholder="Bir soru sorun..."></chat-widget>
 
   <script type="module" src="/src/index.js"></script>
-  <script>
+  <script type="module">
+    import { filterProducts } from '/src/utils/filterProducts.js';
+
+    // Keep in sync with api/src/services/productService.js
+    const PRODUCTS = [
+      { sku: 'SKU-IP15',  name: 'iPhone 15 Pro',                    brand: 'Apple',   category: 'Telefon', price: 49999 },
+      { sku: 'SKU-S24',   name: 'Samsung Galaxy S24 Ultra',         brand: 'Samsung', category: 'Telefon', price: 54999 },
+      { sku: 'SKU-P9',    name: 'Google Pixel 9 Pro',               brand: 'Google',  category: 'Telefon', price: 39999 },
+      { sku: 'SKU-MBA',   name: 'MacBook Air M3',                   brand: 'Apple',   category: 'Laptop',  price: 44999 },
+      { sku: 'SKU-TP14',  name: 'Lenovo ThinkPad X1 Carbon Gen 11', brand: 'Lenovo',  category: 'Laptop',  price: 52999 },
+      { sku: 'SKU-XPS15', name: 'Dell XPS 15',                      brand: 'Dell',    category: 'Laptop',  price: 47999 },
+    ];
+
+    // Filter state
+    let activeCategory = '';
+    let maxPrice = null;
+
+    // Selection state
     const selectedSkus = new Set();
 
-    document.querySelectorAll('.sku-btn').forEach(btn => {
+    /**
+     * Updates the compare button label and disabled state based on selection count.
+     */
+    const updateCompareButton = () => {
+      const btn = document.getElementById('compare-btn');
+      const count = selectedSkus.size;
+      btn.disabled = count < 2;
+      btn.textContent = count > 0 ? `Karşılaştır (${count})` : 'Karşılaştır';
+    };
+
+    /**
+     * Applies the current search, category, and price filters to all product buttons.
+     * Shows or hides each button and toggles the empty-state message.
+     */
+    const applyFilters = () => {
+      const term = document.getElementById('search-input').value;
+      const criteria = { search: term, category: activeCategory, maxPrice };
+      const visibleSkus = new Set(filterProducts(PRODUCTS, criteria).map((p) => p.sku));
+
+      let visibleCount = 0;
+      document.querySelectorAll('.sku-btn').forEach((btn) => {
+        const visible = visibleSkus.has(btn.dataset.sku);
+        btn.style.display = visible ? '' : 'none';
+        if (visible) visibleCount++;
+      });
+
+      document.getElementById('no-results').style.display = visibleCount === 0 ? '' : 'none';
+      document.getElementById('product-grid').style.display = visibleCount === 0 ? 'none' : '';
+
+      updateCompareButton();
+    };
+
+    /**
+     * Updates the active styling on category pill buttons.
+     */
+    const updateCategoryPills = () => {
+      document.querySelectorAll('.cat-btn').forEach((btn) => {
+        if (btn.dataset.category === activeCategory) {
+          btn.classList.add('active');
+        } else {
+          btn.classList.remove('active');
+        }
+      });
+    };
+
+    // Product button click: toggle selection
+    document.querySelectorAll('.sku-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         const sku = btn.dataset.sku;
         if (selectedSkus.has(sku)) {
@@ -64,19 +174,52 @@
           btn.style.color = '#fff';
         }
         document.getElementById('selected').textContent =
-          selectedSkus.size > 0 ? 'Secili: ' + [...selectedSkus].join(', ') : '';
-        document.getElementById('compare-btn').disabled = selectedSkus.size < 2;
+          selectedSkus.size > 0 ? 'Seçili: ' + [...selectedSkus].join(', ') : '';
+        updateCompareButton();
       });
     });
 
+    // Search input: apply filters and toggle clear button visibility
+    document.getElementById('search-input').addEventListener('input', (event) => {
+      const clearBtn = document.getElementById('search-clear');
+      clearBtn.style.display = event.target.value.length > 0 ? '' : 'none';
+      applyFilters();
+    });
+
+    // Clear button: reset search input and reapply filters
+    document.getElementById('search-clear').addEventListener('click', () => {
+      const searchInput = document.getElementById('search-input');
+      searchInput.value = '';
+      document.getElementById('search-clear').style.display = 'none';
+      applyFilters();
+    });
+
+    // Category pill click: toggle or set active category
+    document.querySelectorAll('.cat-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const clickedCategory = btn.dataset.category;
+        if (clickedCategory === activeCategory) {
+          // Clicking the already-active category resets to "Tümü"
+          activeCategory = '';
+        } else {
+          activeCategory = clickedCategory;
+        }
+        updateCategoryPills();
+        applyFilters();
+      });
+    });
+
+    // Price dropdown: update maxPrice and reapply filters
+    document.getElementById('price-filter').addEventListener('change', (event) => {
+      maxPrice = parseInt(event.target.value) || null;
+      applyFilters();
+    });
+
+    // Compare button: dispatch set-skus event
     document.getElementById('compare-btn').addEventListener('click', () => {
       document.dispatchEvent(new CustomEvent('set-skus', {
-        detail: { skus: [...selectedSkus] }
+        detail: { skus: [...selectedSkus] },
       }));
-      document.getElementById('compare-btn').textContent = 'SKU\'lar gonderildi!';
-      setTimeout(() => {
-        document.getElementById('compare-btn').textContent = 'Karsilastir';
-      }, 2000);
     });
   </script>
 </body>

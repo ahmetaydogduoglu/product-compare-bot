@@ -354,6 +354,35 @@
     background: #4f46e5;
   }
 
+  /* Dark theme overrides for markdown code and tables */
+  .dark .markdown :global(pre),
+  .dark .markdown :global(code) {
+    background: #111827;
+    color: #e5e7eb;
+  }
+
+  .dark .markdown :global(pre code) {
+    background: none;
+  }
+
+  .dark .markdown :global(th) {
+    background: #374151;
+  }
+
+  .dark .markdown :global(th),
+  .dark .markdown :global(td) {
+    border-color: #4b5563;
+  }
+
+  .dark .markdown :global(a) {
+    color: #818cf8;
+  }
+
+  .dark .markdown :global(blockquote) {
+    border-color: #4b5563;
+    color: #9ca3af;
+  }
+
   /* Header */
   .header {
     display: flex;
@@ -397,9 +426,11 @@
   }
   .bubble {
     max-width: 75%;
+    min-width: 0;
     padding: 10px 14px;
     border-radius: 16px;
     word-wrap: break-word;
+    overflow: hidden;
   }
   .bubble.user {
     background: #4f46e5;
@@ -456,6 +487,86 @@
   .markdown :global(strong) {
     font-weight: 600;
   }
+
+  /* Prevent any markdown content from breaking out of the bubble */
+  .markdown {
+    overflow-wrap: break-word;
+    word-break: break-word;
+    min-width: 0;
+  }
+
+  /* Code blocks: horizontal scroll inside the bubble, never overflow */
+  .markdown :global(pre) {
+    overflow-x: auto;
+    white-space: pre;
+    background: #f3f4f6;
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin: 6px 0;
+    font-size: 12px;
+    line-height: 1.5;
+    max-width: 100%;
+  }
+
+  /* Inline code */
+  .markdown :global(code) {
+    background: #f3f4f6;
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 12px;
+    word-break: break-all;
+  }
+
+  /* Pre wraps code — reset inner code styles so they don't double-up */
+  .markdown :global(pre code) {
+    background: none;
+    padding: 0;
+    border-radius: 0;
+    word-break: normal;
+  }
+
+  /* Tables: scroll horizontally inside the bubble */
+  .markdown :global(table) {
+    display: block;
+    overflow-x: auto;
+    width: 100%;
+    border-collapse: collapse;
+    margin: 6px 0;
+    font-size: 13px;
+  }
+  .markdown :global(th),
+  .markdown :global(td) {
+    border: 1px solid #d1d5db;
+    padding: 6px 10px;
+    text-align: left;
+    white-space: nowrap;
+  }
+  .markdown :global(th) {
+    background: #e5e7eb;
+    font-weight: 600;
+  }
+
+  /* Links: break long URLs */
+  .markdown :global(a) {
+    color: #4f46e5;
+    word-break: break-all;
+  }
+
+  /* Images: never wider than the bubble */
+  .markdown :global(img) {
+    max-width: 100%;
+    height: auto;
+    border-radius: 6px;
+  }
+
+  /* Blockquote */
+  .markdown :global(blockquote) {
+    border-left: 3px solid #d1d5db;
+    margin: 6px 0;
+    padding: 4px 10px;
+    color: #6b7280;
+  }
+
   .time {
     font-size: 11px;
     opacity: 0.7;
