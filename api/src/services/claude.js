@@ -1,9 +1,19 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const mcpClient = require('./mcpClient');
+const qdrantService = require('./qdrantService');
 
 const client = new Anthropic();
 
 const MODEL = 'claude-haiku-4-5-20251001';
+
+// Messages containing these keywords are cart/favorites operations — skip RAG to avoid unnecessary latency.
+// Use specific phrases (not single words like "favori") to avoid false positives
+// e.g. "senin favori ürünün ne" should still go to RAG.
+const SKIP_RAG_KEYWORDS = [
+  'sepetime ekle', 'sepetten çıkar', 'sepeti temizle', 'sepeti göster', 'sepetteki', 'sepetim',
+  'favorilere ekle', 'favorilerden çıkar', 'favorilerimi göster', 'favorilerim', 'favorilerimden',
+  'ne aldım', 'siparişlerim',
+];
 const MAX_TOKENS = 2048;
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_MESSAGES = 20;
@@ -43,19 +53,34 @@ const cleanupInterval = setInterval(cleanupSessions, 5 * 60 * 1000);
 cleanupInterval.unref();
 
 /**
- * Builds the system prompt including product data and tool usage instructions.
- * @param {Map} products - Map of SKU to product objects
+ * Builds the system prompt including explicit product data, RAG-retrieved products,
+ * and tool usage instructions.
+ * @param {Map} products - Map of SKU to product objects (explicitly selected by user)
+ * @param {object[]} ragProducts - Products retrieved via semantic search for this message
  * @param {string} sessionId - Current user's session ID, used as userId in tool calls
  * @returns {string} System prompt for Claude
  */
-function buildSystemPrompt(products, sessionId) {
-  const productBlock = JSON.stringify([...products.values()], null, 2);
+function buildSystemPrompt(products, ragProducts, sessionId) {
+  const explicitList = [...products.values()];
+  const hasExplicit = explicitList.length > 0;
+  const hasRag = ragProducts && ragProducts.length > 0;
+
+  let contextBlock;
+  if (hasExplicit && hasRag) {
+    contextBlock =
+      `Kullanıcının seçtiği ürünler:\n${JSON.stringify(explicitList, null, 2)}\n\n` +
+      `Kullanıcı sorusuyla semantik olarak eşleşen ek ürünler:\n${JSON.stringify(ragProducts, null, 2)}`;
+  } else if (hasExplicit) {
+    contextBlock = `Karşılaştırılacak ürünler:\n${JSON.stringify(explicitList, null, 2)}`;
+  } else if (hasRag) {
+    contextBlock = `Kullanıcı sorusuyla semantik olarak eşleşen ürünler:\n${JSON.stringify(ragProducts, null, 2)}`;
+  } else {
+    contextBlock = 'Henüz ürün bağlamı yok.';
+  }
 
   return `Sen bir ürün karşılaştırma asistanısın. Kullanıcıya ürünleri karşılaştırmasında yardımcı oluyorsun.
 
-Aşağıda karşılaştırılacak ürünlerin bilgileri verilmiştir:
-
-${productBlock}
+${contextBlock}
 
 Görevlerin:
 - Ürünleri özelliklerine göre karşılaştır
@@ -133,10 +158,35 @@ async function chat(sessionId, userMessage) {
   // Fetch MCP tools (cached after first call)
   const tools = await getToolsCached();
 
+  // Semantic search in Qdrant for products relevant to this message (RAG)
+  // Skipped for cart/favorites operations to avoid unnecessary latency.
+  const skipRag = SKIP_RAG_KEYWORDS.some((kw) => userMessage.toLowerCase().includes(kw));
+  let ragProducts = [];
+  if (skipRag) {
+    console.log(`[RAG] session=${sessionId} | skipped (cart/favorites intent)`);
+  } else {
+    try {
+      const results = await qdrantService.searchProducts(userMessage);
+      // Exclude products already explicitly in the session to avoid duplication
+      ragProducts = results.filter((p) => !session.products.has(p.sku));
+      console.log(`[RAG] session=${sessionId} | injected=${ragProducts.length} | products=[${ragProducts.map((p) => p.name).join(', ') || 'none'}]`);
+    } catch (err) {
+      // RAG is best-effort — continue without it if Qdrant is unavailable
+      console.error('[RAG] Search failed, continuing without:', err.message);
+    }
+  }
+
+  // Block only when there are no products AND no tools — if tools are available,
+  // Claude may handle the request via MCP (e.g. cart, favorites) without product context.
+  if (session.products.size === 0 && ragProducts.length === 0 && tools.length === 0) {
+    session.messages = previousMessages;
+    return 'Aradığınız kriterlere uygun ürün bulunamadı. Lütfen karşılaştırmak istediğiniz ürünleri seçin veya farklı bir arama yapın.';
+  }
+
   const createParams = {
     model: MODEL,
     max_tokens: MAX_TOKENS,
-    system: buildSystemPrompt(session.products, sessionId),
+    system: buildSystemPrompt(session.products, ragProducts, sessionId),
     messages: session.messages,
   };
 
@@ -191,11 +241,11 @@ async function chat(sessionId, userMessage) {
     // Push tool results as a user message
     session.messages.push({ role: 'user', content: toolResults });
 
-    // Call Claude again with updated conversation
+    // Call Claude again with updated conversation (reuse same ragProducts from this turn)
     const nextParams = {
       model: MODEL,
       max_tokens: MAX_TOKENS,
-      system: buildSystemPrompt(session.products, sessionId),
+      system: buildSystemPrompt(session.products, ragProducts, sessionId),
       messages: session.messages,
     };
 
@@ -248,6 +298,33 @@ async function chatStream(sessionId, userMessage, handler) {
 
   // Fetch MCP tools (cached after first call)
   const tools = await getToolsCached();
+
+  // Semantic search in Qdrant for products relevant to this message (RAG)
+  // Done once before the stream loop so the same context is used across tool rounds.
+  // Skipped for cart/favorites operations to avoid unnecessary latency.
+  const skipRag = SKIP_RAG_KEYWORDS.some((kw) => userMessage.toLowerCase().includes(kw));
+  let ragProducts = [];
+  if (skipRag) {
+    console.log(`[RAG] session=${sessionId} | skipped (cart/favorites intent)`);
+  } else {
+    try {
+      const results = await qdrantService.searchProducts(userMessage);
+      ragProducts = results.filter((p) => !session.products.has(p.sku));
+      console.log(`[RAG] session=${sessionId} | injected=${ragProducts.length} | products=[${ragProducts.map((p) => p.name).join(', ') || 'none'}]`);
+    } catch (err) {
+      console.error('[RAG] Search failed, continuing without:', err.message);
+    }
+  }
+
+  // Block only when there are no products AND no tools — if tools are available,
+  // Claude may handle the request via MCP (e.g. cart, favorites) without product context.
+  if (session.products.size === 0 && ragProducts.length === 0 && tools.length === 0) {
+    session.messages = previousMessages;
+    handler.onTextDelta('Aradığınız kriterlere uygun ürün bulunamadı. Lütfen karşılaştırmak istediğiniz ürünleri seçin veya farklı bir arama yapın.');
+    handler.onDone();
+    return;
+  }
+
   let fullAssistantText = '';
   let rounds = 0;
   let continueLoop = true;
@@ -263,7 +340,7 @@ async function chatStream(sessionId, userMessage, handler) {
       const params = {
         model: MODEL,
         max_tokens: MAX_TOKENS,
-        system: buildSystemPrompt(session.products, sessionId),
+        system: buildSystemPrompt(session.products, ragProducts, sessionId),
         messages: session.messages,
       };
 
